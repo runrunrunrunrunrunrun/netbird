@@ -12,7 +12,7 @@ import (
 )
 
 func DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, error) {
-	if CustomRoutingDisabled() {
+	if CustomRoutingDisabled() && !HasExternalSocketControl() {
 		return net.DialUDP(network, laddr, raddr)
 	}
 
@@ -47,7 +47,7 @@ func DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPConn, erro
 }
 
 func DialTCP(network string, laddr, raddr *net.TCPAddr) (transport.TCPConn, error) {
-	if CustomRoutingDisabled() {
+	if CustomRoutingDisabled() && !HasExternalSocketControl() {
 		return net.DialTCP(network, laddr, raddr)
 	}
 

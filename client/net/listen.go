@@ -15,7 +15,7 @@ import (
 // ListenUDP listens on the network address and returns a transport.UDPConn
 // which includes support for write and close hooks.
 func ListenUDP(network string, laddr *net.UDPAddr) (transport.UDPConn, error) {
-	if CustomRoutingDisabled() {
+	if CustomRoutingDisabled() && !HasExternalSocketControl() {
 		return net.ListenUDP(network, laddr)
 	}
 

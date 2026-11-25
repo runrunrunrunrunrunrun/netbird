@@ -19,9 +19,15 @@ func SetAndroidProtectSocketFn(fn func(fd int32) bool) {
 	androidProtectSocketLock.Unlock()
 }
 
-// ControlProtectSocket is a Control function that sets the fwmark on the socket
-func ControlProtectSocket(_, _ string, c syscall.RawConn) error {
-	if netstack.IsEnabled() {
+func hasAndroidProtectSocket() bool {
+	androidProtectSocketLock.Lock()
+	defer androidProtectSocketLock.Unlock()
+	return androidProtectSocket != nil
+}
+
+// ControlProtectSocket protects sockets through the Android VpnService callback.
+func ControlProtectSocket(_, address string, c syscall.RawConn) error {
+	if isLoopbackAddress(address) {
 		return nil
 	}
 	var aErr error
@@ -30,6 +36,9 @@ func ControlProtectSocket(_, _ string, c syscall.RawConn) error {
 		defer androidProtectSocketLock.Unlock()
 
 		if androidProtectSocket == nil {
+			if netstack.IsEnabled() {
+				return
+			}
 			aErr = fmt.Errorf("socket protection function not set")
 			return
 		}

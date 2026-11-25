@@ -2,13 +2,7 @@
 
 package net
 
-import (
-	"syscall"
-)
-
-// init configures the net.ListenerConfig Control function to set the fwmark on the socket
+// init configures the net.ListenerConfig Control function to set the fwmark or bind to the outbound device
 func (l *ListenerConfig) init() {
-	l.ListenConfig.Control = func(_, _ string, c syscall.RawConn) error {
-		return setRawSocketMark(c)
-	}
+	l.ListenConfig.Control = applyLinuxControl
 }

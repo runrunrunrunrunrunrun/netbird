@@ -45,7 +45,7 @@ func dialContext(ctx context.Context, addr string) (net.Conn, error) {
 	// The custom dialer requires root permissions which are not required for
 	// use cases run as non-root. The effective UID is read directly: a passwd
 	// lookup fails without cgo for a UID that has no entry, as on OpenShift.
-	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 && !nbnet.HasExternalSocketControl() {
 		log.Debug("Not running as root, using standard dialer")
 		dialer := &net.Dialer{}
 		return dialer.DialContext(ctx, "tcp", addr)

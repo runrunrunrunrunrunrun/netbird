@@ -132,6 +132,28 @@ func setIPv6BoundIf(fd uintptr, iface *net.Interface) error {
 // applyBoundIfToSocket binds the socket to the cached physical egress interface
 // so scoped route lookup avoids the VPN utun and egresses the underlay directly.
 func applyBoundIfToSocket(network, address string, c syscall.RawConn) error {
+	if ifaceName := GetExternalOutboundInterface(); ifaceName != "" {
+		if isLoopbackAddress(address) {
+			return nil
+		}
+		iface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return fmt.Errorf("lookup outbound interface %q: %w", ifaceName, err)
+		}
+		isV6 := isV6Network(network)
+		var controlErr error
+		if err := c.Control(func(fd uintptr) {
+			if isV6 {
+				controlErr = setIPv6BoundIf(fd, iface)
+			} else {
+				controlErr = setIPv4BoundIf(fd, iface)
+			}
+		}); err != nil {
+			return fmt.Errorf("control: %w", err)
+		}
+		return controlErr
+	}
+
 	if !AdvancedRouting() {
 		return nil
 	}

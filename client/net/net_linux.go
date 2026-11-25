@@ -5,7 +5,28 @@ package net
 import (
 	"fmt"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
+
+func applyLinuxControl(_, address string, c syscall.RawConn) error {
+	if ifaceName := GetExternalOutboundInterface(); ifaceName != "" {
+		if isLoopbackAddress(address) {
+			return nil
+		}
+		var bindErr error
+		if err := c.Control(func(fd uintptr) {
+			bindErr = unix.BindToDevice(int(fd), ifaceName)
+		}); err != nil {
+			return fmt.Errorf("control: %w", err)
+		}
+		if bindErr != nil {
+			return fmt.Errorf("bind to device %q: %w", ifaceName, bindErr)
+		}
+		return nil
+	}
+	return setRawSocketMark(c)
+}
 
 // SetSocketMark sets the SO_MARK option on the given socket connection
 func SetSocketMark(conn syscall.Conn) error {

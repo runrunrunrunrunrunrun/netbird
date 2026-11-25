@@ -2,11 +2,7 @@
 
 package net
 
-import "syscall"
-
-// init configures the net.Dialer Control function to set the fwmark on the socket
+// init configures the net.Dialer Control function to set the fwmark or bind to the outbound device
 func (d *Dialer) init() {
-	d.Dialer.Control = func(_, _ string, c syscall.RawConn) error {
-		return setRawSocketMark(c)
-	}
+	d.Dialer.Control = applyLinuxControl
 }

@@ -249,8 +249,59 @@ func checkDualStack(fd uintptr) bool {
 	return err == nil && v6Only == 0
 }
 
+func applyExternalUnicastIF(ifaceName string, network string, address string, c syscall.RawConn) error {
+	if isLoopbackAddress(address) {
+		return nil
+	}
+
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return fmt.Errorf("lookup outbound interface %q: %w", ifaceName, err)
+	}
+
+	var controlErr error
+	err = c.Control(func(fd uintptr) {
+		switch {
+		case strings.HasSuffix(network, "4"):
+			if setErr := setIPv4UnicastIF(fd, iface); setErr != nil {
+				controlErr = setErr
+				return
+			}
+			log.Debugf("Set external IP_UNICAST_IF=%d on %s for %s to %s", iface.Index, iface.Name, network, address)
+		case strings.HasSuffix(network, "6"):
+			isDualStack := checkDualStack(fd)
+			if isDualStack {
+				if setErr := setIPv4UnicastIF(fd, iface); setErr != nil {
+					controlErr = setErr
+					return
+				}
+				log.Debugf("Set external IP_UNICAST_IF=%d on %s for %s to %s (dual-stack)", iface.Index, iface.Name, network, address)
+			}
+			if setErr := setIPv6UnicastIF(fd, iface); setErr != nil {
+				if isDualStack {
+					log.Debugf("Skip IPV6_UNICAST_IF on dual-stack socket for %s (%s): %v", iface.Name, network, setErr)
+					return
+				}
+				controlErr = setErr
+				return
+			}
+			log.Debugf("Set external IPV6_UNICAST_IF=%d on %s for %s to %s", iface.Index, iface.Name, network, address)
+		default:
+			controlErr = fmt.Errorf("unexpected network type: %s", network)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("control: %w", err)
+	}
+	return controlErr
+}
+
 // applyUnicastIFToSocket applies IpUnicastIf to a socket based on the destination address
 func applyUnicastIFToSocket(network string, address string, c syscall.RawConn) error {
+	if ifaceName := GetExternalOutboundInterface(); ifaceName != "" {
+		return applyExternalUnicastIF(ifaceName, network, address, c)
+	}
+
 	if !AdvancedRouting() {
 		return nil
 	}
