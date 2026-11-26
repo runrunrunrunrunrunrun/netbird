@@ -461,8 +461,14 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 			engineConfig.StateDir = filepath.Dir(path)
 		}
 
+		relayOpts := []relayClient.ManagerOption{
+			relayClient.WithNetEvents(c.netMgr),
+		}
+		if netstack.IsEnabled() {
+			relayOpts = append(relayOpts, relayClient.WithConnectionTimeout(6*time.Second))
+		}
 		relayManager := relayClient.NewManager(engineCtx, relayURLs, myPrivateKey.PublicKey().String(), engineConfig.MTU,
-			relayClient.WithNetEvents(c.netMgr))
+			relayOpts...)
 		c.statusRecorder.SetRelayMgr(relayManager)
 		if len(relayURLs) > 0 {
 			if token != nil {

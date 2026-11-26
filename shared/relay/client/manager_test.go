@@ -37,6 +37,23 @@ func TestEmptyURL(t *testing.T) {
 	}
 }
 
+func TestWithConnectionTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mgr := NewManager(ctx, []string{"rel://127.0.0.1:1234"}, "alice", iface.DefaultMTU,
+		WithConnectionTimeout(6*time.Second))
+	if mgr.serverPicker.ConnectionTimeout != 6*time.Second {
+		t.Fatalf("ConnectionTimeout = %v, want 6s", mgr.serverPicker.ConnectionTimeout)
+	}
+
+	mgrDefault := NewManager(ctx, []string{"rel://127.0.0.1:1234"}, "alice", iface.DefaultMTU,
+		WithConnectionTimeout(0))
+	if mgrDefault.serverPicker.ConnectionTimeout != defaultConnectionTimeout {
+		t.Fatalf("ConnectionTimeout with 0 = %v, want %v", mgrDefault.serverPicker.ConnectionTimeout, defaultConnectionTimeout)
+	}
+}
+
 func TestForeignConn(t *testing.T) {
 	ctx := context.Background()
 

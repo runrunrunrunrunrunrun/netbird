@@ -60,9 +60,23 @@ func TestClientStartTimeoutRollback(t *testing.T) {
 		startErr <- client.Start(startCtx)
 	}()
 
+	// Status() must remain non-blocking while Start() is in flight.
+	statusDone := make(chan struct{})
+	go func() {
+		_, _ = client.Status()
+		close(statusDone)
+	}()
+	select {
+	case <-statusDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client.Status blocked while client.Start was in progress")
+	}
+
 	select {
 	case err := <-startErr:
 		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Contains(t, err.Error(), "mgmt=")
+		require.Contains(t, err.Error(), "signal=")
 	case <-time.After(60 * time.Second):
 		t.Fatal("client.Start did not return after its context expired: Engine.Stop deadlocked against Engine.Start waiting for the signal stream")
 	}

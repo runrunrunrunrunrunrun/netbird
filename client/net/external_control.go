@@ -16,8 +16,12 @@ var (
 // interface name for NetBird's control-plane, relay, ICE, and WireGuard sockets
 // when embedded inside an external TUN/VPN host such as Xray.
 func SetExternalOutboundInterface(name string) {
+	trimmed := strings.TrimSpace(name)
+	if strings.EqualFold(trimmed, "auto") {
+		trimmed = ""
+	}
 	externalOutboundIfaceMu.Lock()
-	externalOutboundIface = strings.TrimSpace(name)
+	externalOutboundIface = trimmed
 	externalOutboundIfaceMu.Unlock()
 }
 

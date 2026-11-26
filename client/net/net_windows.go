@@ -269,7 +269,9 @@ func applyExternalUnicastIF(ifaceName string, network string, address string, c 
 			}
 			log.Debugf("Set external IP_UNICAST_IF=%d on %s for %s to %s", iface.Index, iface.Name, network, address)
 		case strings.HasSuffix(network, "6"):
-			isDualStack := checkDualStack(fd)
+			// Match WireGuard/Xray Windows socket binding: only dual-stack UDP
+			// sockets carry IPv4 traffic alongside IPv6.
+			isDualStack := network == "udp6" && checkDualStack(fd)
 			if isDualStack {
 				if setErr := setIPv4UnicastIF(fd, iface); setErr != nil {
 					controlErr = setErr
@@ -280,6 +282,12 @@ func applyExternalUnicastIF(ifaceName string, network string, address string, c 
 			if setErr := setIPv6UnicastIF(fd, iface); setErr != nil {
 				if isDualStack {
 					log.Debugf("Skip IPV6_UNICAST_IF on dual-stack socket for %s (%s): %v", iface.Name, network, setErr)
+					return
+				}
+				if network == "udp6" {
+					// Returning EAFNOSUPPORT lets wireguard-go StdNetBind.Open
+					// cleanly keep IPv4 when the physical interface has no IPv6.
+					controlErr = fmt.Errorf("%w: %v", syscall.EAFNOSUPPORT, setErr)
 					return
 				}
 				controlErr = setErr

@@ -19,6 +19,16 @@ func TestExternalOutboundInterface(t *testing.T) {
 	if got := GetExternalOutboundInterface(); got != "" {
 		t.Fatalf("GetExternalOutboundInterface() = %q, want empty", got)
 	}
+
+	SetExternalOutboundInterface("auto")
+	if got := GetExternalOutboundInterface(); got != "" {
+		t.Fatalf("GetExternalOutboundInterface() for \"auto\" = %q, want empty", got)
+	}
+
+	SetExternalOutboundInterface(" AUTO ")
+	if got := GetExternalOutboundInterface(); got != "" {
+		t.Fatalf("GetExternalOutboundInterface() for \" AUTO \" = %q, want empty", got)
+	}
 }
 
 func TestIsLoopbackAddress(t *testing.T) {

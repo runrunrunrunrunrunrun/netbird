@@ -60,6 +60,17 @@ func WithMaxBackoffInterval(d time.Duration) ManagerOption {
 	return func(m *Manager) { m.maxBackoffInterval = d }
 }
 
+// WithConnectionTimeout overrides how long the initial relay picker waits
+// before letting background reconnect loops take over. Non-positive values keep
+// the default.
+func WithConnectionTimeout(d time.Duration) ManagerOption {
+	return func(m *Manager) {
+		if d > 0 {
+			m.serverPicker.ConnectionTimeout = d
+		}
+	}
+}
+
 // WithNetEvents injects the OS network event handling.
 func WithNetEvents(events NetEvents) ManagerOption {
 	return func(m *Manager) { m.netEvents = events }

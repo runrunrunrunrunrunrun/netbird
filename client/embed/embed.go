@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -48,6 +49,7 @@ type Client struct {
 	deviceName string
 	config     *profilemanager.Config
 	mu         sync.Mutex
+	starting   bool
 	cancel     context.CancelFunc
 	setupKey   string
 	jwtToken   string
@@ -277,28 +279,36 @@ func New(opts Options) (*Client, error) {
 // Pass a context with a deadline to limit the time spent waiting for the engine to start.
 func (c *Client) Start(startCtx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.connect != nil {
+	if c.connect != nil || c.starting {
+		c.mu.Unlock()
 		return ErrClientAlreadyStarted
 	}
+	c.starting = true
+	c.mu.Unlock()
 
+	var started bool
 	ctx, cancel := context.WithCancel(internal.CtxInitState(context.Background()))
 	defer func() {
-		if c.connect == nil {
+		c.mu.Lock()
+		c.starting = false
+		c.mu.Unlock()
+		if !started {
 			cancel()
 		}
 	}()
 
 	// nolint:staticcheck
 	ctx = context.WithValue(ctx, system.DeviceNameCtxKey, c.deviceName)
+	// nolint:staticcheck
+	authCtx := context.WithValue(startCtx, system.DeviceNameCtxKey, c.deviceName)
 
-	authClient, err := auth.NewAuth(ctx, c.config.PrivateKey, c.config.ManagementURL, c.config)
+	authClient, err := auth.NewAuth(authCtx, c.config.PrivateKey, c.config.ManagementURL, c.config)
 	if err != nil {
 		return fmt.Errorf("create auth client: %w", err)
 	}
 	defer authClient.Close()
 
-	if err, _ := authClient.Login(ctx, c.setupKey, c.jwtToken); err != nil {
+	if err, _ := authClient.Login(authCtx, c.setupKey, c.jwtToken); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
 	var connectOpts []internal.ConnectClientOption
@@ -320,6 +330,7 @@ func (c *Client) Start(startCtx context.Context) error {
 
 	select {
 	case <-startCtx.Done():
+		diag := c.startupTimeoutDiagnostics(ctx)
 		// ConnectClient.Stop now cancels its own run context and waits for the
 		// run loop to tear the engine down, so this cancel() is no longer
 		// required to break the deadlock and could be removed. It is kept as a
@@ -327,7 +338,13 @@ func (c *Client) Start(startCtx context.Context) error {
 		// guarantees the run loop is unblocked even if Stop's contract regresses.
 		cancel()
 		if stopErr := client.Stop(); stopErr != nil {
+			if diag != "" {
+				return fmt.Errorf("stop error after context done. Stop error: %w. Context done: %w (%s)", stopErr, startCtx.Err(), diag)
+			}
 			return fmt.Errorf("stop error after context done. Stop error: %w. Context done: %w", stopErr, startCtx.Err())
+		}
+		if diag != "" {
+			return fmt.Errorf("%w (%s)", startCtx.Err(), diag)
 		}
 		return startCtx.Err()
 	case err := <-clientErr:
@@ -335,10 +352,34 @@ func (c *Client) Start(startCtx context.Context) error {
 	case <-run:
 	}
 
+	c.mu.Lock()
 	c.connect = client
 	c.cancel = cancel
+	started = true
+	c.mu.Unlock()
 
 	return nil
+}
+
+func (c *Client) startupTimeoutDiagnostics(ctx context.Context) string {
+	status, stateErr := internal.CtxGetState(ctx).Status()
+	full := c.recorder.GetFullStatus()
+
+	var parts []string
+	if status != "" {
+		parts = append(parts, fmt.Sprintf("status=%s", status))
+	}
+	parts = append(parts, fmt.Sprintf("mgmt=%t", full.ManagementState.Connected))
+	parts = append(parts, fmt.Sprintf("signal=%t", full.SignalState.Connected))
+	switch {
+	case stateErr != nil:
+		parts = append(parts, fmt.Sprintf("cause=%s", stateErr))
+	case full.SignalState.Error != nil:
+		parts = append(parts, fmt.Sprintf("signalErr=%s", full.SignalState.Error))
+	case full.ManagementState.Error != nil:
+		parts = append(parts, fmt.Sprintf("mgmtErr=%s", full.ManagementState.Error))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Stop gracefully stops the client.
