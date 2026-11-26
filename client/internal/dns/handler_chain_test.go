@@ -1304,5 +1304,14 @@ func TestHandlerChain_ManagedRangeHelpers(t *testing.T) {
 	// Unknown public domain must NOT fall through to PriorityFallback "." handler.
 	pubQ := new(dns.Msg).SetQuestion("google.com.", dns.TypeA)
 	_, err = chain.ResolveInternalRange(context.Background(), pubQ, nbdns.PriorityUpstream, nbdns.PriorityDNSRoute)
-	assert.Error(t, err)
+	require.ErrorIs(t, err, nbdns.ErrNoManagedHandler)
+
+	// PriorityDefault handler is detected and resolvable in [PriorityDefault, PriorityDefault].
+	assert.False(t, chain.HasDefaultHandler())
+	chain.AddHandler(".", &answeringHandler{name: "primary", ip: "100.64.0.53"}, nbdns.PriorityDefault)
+	assert.True(t, chain.HasDefaultHandler())
+	defResp, err := chain.ResolveInternalRange(context.Background(), pubQ, nbdns.PriorityDefault, nbdns.PriorityDefault)
+	require.NoError(t, err)
+	require.Len(t, defResp.Answer, 1)
+	assert.Equal(t, "100.64.0.53", defResp.Answer[0].(*dns.A).A.String())
 }

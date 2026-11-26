@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/netbirdio/netbird/client/internal/dns/resutil"
 )
+
+// ErrNoManagedHandler indicates no handler in the requested priority range produced an answer.
+var ErrNoManagedHandler = errors.New("no managed dns handler matched")
 
 const (
 	PriorityMgmtCache = 150
@@ -371,10 +375,23 @@ func (c *HandlerChain) ResolveInternalRange(ctx context.Context, r *dns.Msg, min
 	}
 
 	if base.response == nil || base.response.Rcode == dns.RcodeRefused {
-		return nil, fmt.Errorf("no handler resolved %s in priority [%d, %d]",
-			strings.ToLower(r.Question[0].Name), minPriority, maxPriority)
+		return nil, fmt.Errorf("%w for %s in priority [%d, %d]",
+			ErrNoManagedHandler, strings.ToLower(r.Question[0].Name), minPriority, maxPriority)
 	}
 	return base.response, nil
+}
+
+// HasDefaultHandler reports whether any catch-all "." handler is registered at PriorityDefault.
+func (c *HandlerChain) HasDefaultHandler() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, h := range c.handlers {
+		if h.Priority == PriorityDefault && h.Pattern == "." {
+			return true
+		}
+	}
+	return false
 }
 
 // HasRootHandlerAtOrBelow reports whether any "." handler is registered at

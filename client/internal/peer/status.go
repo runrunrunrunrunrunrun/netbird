@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1299,8 +1300,100 @@ func (d *Status) GetPeerFQDNs() []string {
 	for _, state := range d.peers {
 		add(state.FQDN)
 	}
+	for _, state := range d.offlinePeers {
+		add(state.FQDN)
+	}
 	slices.Sort(fqdns)
 	return fqdns
+}
+
+func normalizePeerFQDN(fqdn string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(fqdn)), ".")
+}
+
+func parseOverlayAddrString(raw string) netip.Addr {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return netip.Addr{}
+	}
+	if addr, err := netip.ParseAddr(s); err == nil && addr.IsValid() {
+		return addr.Unmap()
+	}
+	if prefix, err := netip.ParsePrefix(s); err == nil && prefix.IsValid() {
+		return prefix.Addr().Unmap()
+	}
+	return netip.Addr{}
+}
+
+func parsePeerOverlayAddrs(ipStr, ipv6Str string) (v4, v6 netip.Addr) {
+	return parseOverlayAddrString(ipStr), parseOverlayAddrString(ipv6Str)
+}
+
+// LookupPeerIPsByFQDN returns the overlay IPs for local, connected, or offline peers matching fqdn.
+func (d *Status) LookupPeerIPsByFQDN(fqdn string) (v4, v6 netip.Addr, ok bool) {
+	norm := normalizePeerFQDN(fqdn)
+	if norm == "" {
+		return netip.Addr{}, netip.Addr{}, false
+	}
+
+	d.mux.RLock()
+	defer d.mux.RUnlock()
+
+	if normalizePeerFQDN(d.localPeer.FQDN) == norm {
+		v4, v6 = parsePeerOverlayAddrs(d.localPeer.IP, d.localPeer.IPv6)
+		return v4, v6, v4.IsValid() || v6.IsValid()
+	}
+	for _, state := range d.peers {
+		if normalizePeerFQDN(state.FQDN) == norm {
+			v4, v6 = parsePeerOverlayAddrs(state.IP, state.IPv6)
+			return v4, v6, v4.IsValid() || v6.IsValid()
+		}
+	}
+	for _, state := range d.offlinePeers {
+		if normalizePeerFQDN(state.FQDN) == norm {
+			v4, v6 = parsePeerOverlayAddrs(state.IP, state.IPv6)
+			return v4, v6, v4.IsValid() || v6.IsValid()
+		}
+	}
+	return netip.Addr{}, netip.Addr{}, false
+}
+
+// LookupPeerByShortName matches a dotless hostname against the first label of known peer FQDNs.
+func (d *Status) LookupPeerByShortName(label string) (fqdn string, v4, v6 netip.Addr, ok bool) {
+	norm := normalizePeerFQDN(label)
+	if norm == "" || strings.Contains(norm, ".") {
+		return "", netip.Addr{}, netip.Addr{}, false
+	}
+
+	matchLabel := func(peerFQDN string) bool {
+		p := normalizePeerFQDN(peerFQDN)
+		if p == "" {
+			return false
+		}
+		first, _, _ := strings.Cut(p, ".")
+		return first == norm
+	}
+
+	d.mux.RLock()
+	defer d.mux.RUnlock()
+
+	if matchLabel(d.localPeer.FQDN) {
+		v4, v6 = parsePeerOverlayAddrs(d.localPeer.IP, d.localPeer.IPv6)
+		return normalizePeerFQDN(d.localPeer.FQDN), v4, v6, v4.IsValid() || v6.IsValid()
+	}
+	for _, state := range d.peers {
+		if matchLabel(state.FQDN) {
+			v4, v6 = parsePeerOverlayAddrs(state.IP, state.IPv6)
+			return normalizePeerFQDN(state.FQDN), v4, v6, v4.IsValid() || v6.IsValid()
+		}
+	}
+	for _, state := range d.offlinePeers {
+		if matchLabel(state.FQDN) {
+			v4, v6 = parsePeerOverlayAddrs(state.IP, state.IPv6)
+			return normalizePeerFQDN(state.FQDN), v4, v6, v4.IsValid() || v6.IsValid()
+		}
+	}
+	return "", netip.Addr{}, netip.Addr{}, false
 }
 
 // GetPeerStates returns a snapshot of all known peer states, including offline peers.

@@ -86,6 +86,9 @@ type Server interface {
 	MatchManagedDomain(domain string) bool
 	ManagedDomains() []string
 	ResolveManagedDomain(ctx context.Context, domain string, qtype uint16) (*dns.Msg, error)
+	HasDefaultUpstream() bool
+	ResolveDefaultDomain(ctx context.Context, domain string, qtype uint16) (*dns.Msg, error)
+	HasLocalRecord(domain string) bool
 }
 
 type nsGroupsByDomain struct {
@@ -1469,6 +1472,27 @@ func (s *DefaultServer) ResolveManagedDomain(ctx context.Context, d string, qtyp
 	req.SetQuestion(dns.Fqdn(d), qtype)
 	req.RecursionDesired = true
 	return s.handlerChain.ResolveInternalRange(ctx, req, PriorityUpstream, PriorityDNSRoute)
+}
+
+// HasDefaultUpstream reports whether NetBird has a primary ("All domains") nameserver group.
+func (s *DefaultServer) HasDefaultUpstream() bool {
+	return s.handlerChain != nil && s.handlerChain.HasDefaultHandler()
+}
+
+// ResolveDefaultDomain resolves a DNS question through NetBird's primary ("All domains") handler.
+func (s *DefaultServer) ResolveDefaultDomain(ctx context.Context, d string, qtype uint16) (*dns.Msg, error) {
+	if s.handlerChain == nil {
+		return nil, errors.New("dns handler chain not initialized")
+	}
+	req := new(dns.Msg)
+	req.SetQuestion(dns.Fqdn(d), qtype)
+	req.RecursionDesired = true
+	return s.handlerChain.ResolveInternalRange(ctx, req, PriorityDefault, PriorityDefault)
+}
+
+// HasLocalRecord reports whether NetBird's local resolver has a record for d.
+func (s *DefaultServer) HasLocalRecord(d string) bool {
+	return s.localResolver != nil && s.localResolver.HasDomain(d)
 }
 
 // localPeerConnectivity adapts *peer.Status to local.PeerConnectivity so

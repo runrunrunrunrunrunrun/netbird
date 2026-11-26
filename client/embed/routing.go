@@ -2,6 +2,7 @@ package embed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -12,6 +13,26 @@ import (
 	nbdns "github.com/netbirdio/netbird/client/internal/dns"
 	"github.com/netbirdio/netbird/route"
 )
+
+// ErrDNSFallthrough indicates NetBird did not produce an answer and the caller
+// should fall through to normal/upstream DNS resolution.
+var ErrDNSFallthrough = errors.New("netbird dns fallthrough")
+
+// DNSRcodeError reports an authoritative non-success DNS response code returned
+// by NetBird's managed DNS handlers.
+type DNSRcodeError struct {
+	Domain string
+	Rcode  int
+}
+
+func (e *DNSRcodeError) Error() string {
+	return fmt.Sprintf("netbird dns lookup for %q failed: rcode=%s", e.Domain, miekgdns.RcodeToString[e.Rcode])
+}
+
+// DNSRcode implements interfaces expecting the numeric DNS response code.
+func (e *DNSRcodeError) DNSRcode() int {
+	return e.Rcode
+}
 
 // RoutingTable summarizes the active NetBird overlay networks, routed CIDRs,
 // dynamic route domains, exit-node availability, and managed DNS domains.
@@ -24,6 +45,8 @@ type RoutingTable struct {
 	SelectedExitNode string
 	RouteDomains     []string
 	DNSDomains       []string
+	SearchDomains    []string
+	HasDefaultDNS    bool
 	PeerFQDNs        []string
 }
 
@@ -196,55 +219,274 @@ func (c *Client) RoutingTable() (RoutingTable, error) {
 
 	if dnsSrv := engine.GetDNSServer(); dnsSrv != nil {
 		table.DNSDomains = dnsSrv.ManagedDomains()
+		table.SearchDomains = normalizedDomains(dnsSrv.SearchDomains())
+		table.HasDefaultDNS = dnsSrv.HasDefaultUpstream()
 	}
 
 	slices.Sort(table.RouteDomains)
 	return table, nil
 }
 
+func normalizedDomains(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, d := range raw {
+		norm := normalizeDomain(d)
+		if norm == "" || norm == "." {
+			continue
+		}
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		out = append(out, norm)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// HasDefaultDNS reports whether NetBird has a primary ("All domains") nameserver group.
+func (c *Client) HasDefaultDNS() bool {
+	engine, err := c.getEngine()
+	if err != nil {
+		return false
+	}
+	dnsSrv := engine.GetDNSServer()
+	return dnsSrv != nil && dnsSrv.HasDefaultUpstream()
+}
+
+// SearchDomains returns normalized NetBird search domains.
+func (c *Client) SearchDomains() []string {
+	engine, err := c.getEngine()
+	if err != nil {
+		return nil
+	}
+	dnsSrv := engine.GetDNSServer()
+	if dnsSrv == nil {
+		return nil
+	}
+	return normalizedDomains(dnsSrv.SearchDomains())
+}
+
 // MatchDNSDomain reports whether domain is owned by NetBird's managed DNS
-// (peer FQDNs, custom zones, explicit NS group domains, or dynamic route domains).
+// (peer FQDNs, matching short hostnames, custom zones, explicit NS group domains,
+// or dynamic route domains).
 func (c *Client) MatchDNSDomain(domain string) bool {
 	norm := normalizeDomain(domain)
 	if norm == "" {
 		return false
 	}
+	var dnsSrv nbdns.Server
 	if engine, err := c.getEngine(); err == nil {
-		if dnsSrv := engine.GetDNSServer(); dnsSrv != nil && dnsSrv.MatchManagedDomain(norm) {
+		dnsSrv = engine.GetDNSServer()
+	}
+	if dnsSrv != nil && dnsSrv.MatchManagedDomain(norm) {
+		return true
+	}
+	if c.recorder != nil {
+		if _, _, ok := c.recorder.LookupPeerIPsByFQDN(norm); ok {
 			return true
 		}
 	}
-	if c.recorder != nil {
-		for _, fqdn := range c.recorder.GetPeerFQDNs() {
-			if normalizeDomain(fqdn) == norm {
+	if !strings.Contains(norm, ".") {
+		if c.recorder != nil {
+			if _, _, _, ok := c.recorder.LookupPeerByShortName(norm); ok {
 				return true
+			}
+		}
+		if dnsSrv != nil {
+			for _, sd := range normalizedDomains(dnsSrv.SearchDomains()) {
+				cand := normalizeDomain(norm + "." + sd)
+				if dnsSrv.HasLocalRecord(cand) {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
 
+func (c *Client) lookupPeerIPs(fqdn string, ipv4, ipv6 bool) ([]netip.Addr, bool) {
+	if c.recorder == nil {
+		return nil, false
+	}
+	v4, v6, ok := c.recorder.LookupPeerIPsByFQDN(fqdn)
+	if !ok {
+		return nil, false
+	}
+	return filterAddrPair(v4, v6, ipv4, ipv6), true
+}
+
+func filterAddrPair(v4, v6 netip.Addr, wantV4, wantV6 bool) []netip.Addr {
+	var addrs []netip.Addr
+	if wantV4 && v4.IsValid() {
+		addrs = append(addrs, v4)
+	}
+	if wantV6 && v6.IsValid() {
+		addrs = append(addrs, v6)
+	}
+	return addrs
+}
+
+func (c *Client) expandShortName(label string, dnsSrv nbdns.Server) (fqdn string, v4, v6 netip.Addr, hasPeer bool) {
+	if label == "" || strings.Contains(label, ".") {
+		return "", netip.Addr{}, netip.Addr{}, false
+	}
+	if dnsSrv != nil {
+		for _, sd := range normalizedDomains(dnsSrv.SearchDomains()) {
+			cand := normalizeDomain(label + "." + sd)
+			if dnsSrv.HasLocalRecord(cand) {
+				if c.recorder != nil {
+					v4, v6, hasPeer = c.recorder.LookupPeerIPsByFQDN(cand)
+				}
+				return cand, v4, v6, hasPeer
+			}
+		}
+	}
+	if c.recorder != nil {
+		return c.recorder.LookupPeerByShortName(label)
+	}
+	return "", netip.Addr{}, netip.Addr{}, false
+}
+
 // LookupIP resolves a NetBird-managed domain directly against the embedded
-// DNS server without touching the OS resolver or falling through to fallback
-// upstreams. Returns (nil, 0, nil) when the domain is authoritative/managed
-// but has no records of the requested IP family (NODATA).
+// DNS server or known peer table without touching the OS resolver. Returns
+// (nil, 0, nil) for managed NODATA, or wraps ErrDNSFallthrough when non-authoritative
+// resolution should fall through to Xray's normal DNS.
 func (c *Client) LookupIP(ctx context.Context, domain string, ipv4, ipv6 bool) ([]netip.Addr, uint32, error) {
+	norm := normalizeDomain(domain)
+	if norm == "" {
+		return nil, 0, fmt.Errorf("%w: empty domain", ErrDNSFallthrough)
+	}
+
+	engine, err := c.getEngine()
+	if err != nil {
+		if addrs, ok := c.lookupPeerIPs(norm, ipv4, ipv6); ok {
+			return addrs, 60, nil
+		}
+		if _, v4, v6, ok := c.expandShortName(norm, nil); ok {
+			return filterAddrPair(v4, v6, ipv4, ipv6), 60, nil
+		}
+		return nil, 0, err
+	}
+
+	dnsSrv := engine.GetDNSServer()
+	target := norm
+	var shortPeerV4, shortPeerV6 netip.Addr
+	var hasShortPeer bool
+	if !strings.Contains(norm, ".") {
+		if expanded, v4, v6, ok := c.expandShortName(norm, dnsSrv); expanded != "" {
+			target = expanded
+			shortPeerV4, shortPeerV6, hasShortPeer = v4, v6, ok
+		}
+	}
+
+	if dnsSrv != nil && dnsSrv.MatchManagedDomain(target) {
+		addrs, ttl, lErr := lookupManagedIP(ctx, dnsSrv, target, ipv4, ipv6)
+		if lErr == nil {
+			if len(addrs) > 0 {
+				return addrs, ttl, nil
+			}
+			// Check peer table if the DNS server had no records of the requested family yet.
+			if peerAddrs, ok := c.lookupPeerIPs(target, ipv4, ipv6); ok && len(peerAddrs) > 0 {
+				return peerAddrs, 60, nil
+			}
+			return nil, 0, nil
+		}
+
+		// Non-authoritative fallthrough or NXDOMAIN rescue from peer table.
+		var rcErr *DNSRcodeError
+		if errors.Is(lErr, ErrDNSFallthrough) || (errors.As(lErr, &rcErr) && rcErr.Rcode == miekgdns.RcodeNameError) {
+			if peerAddrs, ok := c.lookupPeerIPs(target, ipv4, ipv6); ok {
+				return peerAddrs, 60, nil
+			}
+			if hasShortPeer {
+				return filterAddrPair(shortPeerV4, shortPeerV6, ipv4, ipv6), 60, nil
+			}
+		}
+
+		if errors.Is(lErr, ErrDNSFallthrough) && dnsSrv.HasDefaultUpstream() {
+			if defAddrs, defTTL, defErr := lookupDefaultIP(ctx, dnsSrv, target, ipv4, ipv6); defErr == nil {
+				return defAddrs, defTTL, nil
+			} else if !errors.Is(defErr, ErrDNSFallthrough) {
+				return nil, 0, defErr
+			}
+		}
+		return nil, 0, lErr
+	}
+
+	if peerAddrs, ok := c.lookupPeerIPs(target, ipv4, ipv6); ok {
+		return peerAddrs, 60, nil
+	}
+	if hasShortPeer {
+		return filterAddrPair(shortPeerV4, shortPeerV6, ipv4, ipv6), 60, nil
+	}
+	return nil, 0, fmt.Errorf("%w: %q is not managed by netbird dns", ErrDNSFallthrough, domain)
+}
+
+// LookupDefaultIP resolves domain via NetBird's primary ("All domains")
+// nameserver group and search-domain expansion.
+func (c *Client) LookupDefaultIP(ctx context.Context, domain string, ipv4, ipv6 bool) ([]netip.Addr, uint32, error) {
+	norm := normalizeDomain(domain)
+	if norm == "" {
+		return nil, 0, fmt.Errorf("%w: empty domain", ErrDNSFallthrough)
+	}
 	engine, err := c.getEngine()
 	if err != nil {
 		return nil, 0, err
 	}
 	dnsSrv := engine.GetDNSServer()
 	if dnsSrv == nil {
-		return nil, 0, fmt.Errorf("netbird dns server not initialized")
+		return nil, 0, fmt.Errorf("%w: netbird dns server not initialized", ErrDNSFallthrough)
 	}
-	return lookupManagedIP(ctx, dnsSrv, domain, ipv4, ipv6)
+
+	if !strings.Contains(norm, ".") {
+		for _, sd := range normalizedDomains(dnsSrv.SearchDomains()) {
+			cand := normalizeDomain(norm + "." + sd)
+			if dnsSrv.MatchManagedDomain(cand) {
+				if addrs, ttl, mErr := lookupManagedIP(ctx, dnsSrv, cand, ipv4, ipv6); mErr == nil && len(addrs) > 0 {
+					return addrs, ttl, nil
+				}
+			}
+			if dnsSrv.HasDefaultUpstream() {
+				if addrs, ttl, dErr := lookupDefaultIP(ctx, dnsSrv, cand, ipv4, ipv6); dErr == nil && len(addrs) > 0 {
+					return addrs, ttl, nil
+				}
+			}
+		}
+	}
+
+	if !dnsSrv.HasDefaultUpstream() {
+		return nil, 0, fmt.Errorf("%w: no default netbird upstream configured", ErrDNSFallthrough)
+	}
+	return lookupDefaultIP(ctx, dnsSrv, norm, ipv4, ipv6)
 }
 
 func lookupManagedIP(ctx context.Context, dnsSrv nbdns.Server, domain string, ipv4, ipv6 bool) ([]netip.Addr, uint32, error) {
 	norm := normalizeDomain(domain)
 	if norm == "" || !dnsSrv.MatchManagedDomain(norm) {
-		return nil, 0, fmt.Errorf("domain %q is not managed by netbird dns", domain)
+		return nil, 0, fmt.Errorf("%w: domain %q is not managed by netbird dns", ErrDNSFallthrough, domain)
 	}
+	return queryHandlerIPs(ctx, norm, dnsSrv.ResolveManagedDomain, ipv4, ipv6)
+}
+
+func lookupDefaultIP(ctx context.Context, dnsSrv nbdns.Server, domain string, ipv4, ipv6 bool) ([]netip.Addr, uint32, error) {
+	norm := normalizeDomain(domain)
+	if norm == "" || !dnsSrv.HasDefaultUpstream() {
+		return nil, 0, fmt.Errorf("%w: no default upstream for %q", ErrDNSFallthrough, domain)
+	}
+	return queryHandlerIPs(ctx, norm, dnsSrv.ResolveDefaultDomain, ipv4, ipv6)
+}
+
+func queryHandlerIPs(
+	ctx context.Context,
+	norm string,
+	resolveFn func(context.Context, string, uint16) (*miekgdns.Msg, error),
+	ipv4, ipv6 bool,
+) ([]netip.Addr, uint32, error) {
 	if !ipv4 && !ipv6 {
 		return nil, 0, nil
 	}
@@ -268,7 +510,7 @@ func lookupManagedIP(ctx context.Context, dnsSrv nbdns.Server, domain string, ip
 	)
 
 	for _, qtype := range qtypes {
-		resp, err := dnsSrv.ResolveManagedDomain(ctx, norm, qtype)
+		resp, err := resolveFn(ctx, norm, qtype)
 		if err != nil {
 			lastErr = err
 			continue
@@ -332,7 +574,10 @@ func lookupManagedIP(ctx context.Context, dnsSrv nbdns.Server, domain string, ip
 		return nil, 0, nil
 	}
 	if lastErr != nil {
+		if errors.Is(lastErr, nbdns.ErrNoManagedHandler) {
+			return nil, 0, fmt.Errorf("%w: %w", ErrDNSFallthrough, lastErr)
+		}
 		return nil, 0, lastErr
 	}
-	return nil, 0, fmt.Errorf("netbird dns lookup for %q failed: rcode=%s", norm, miekgdns.RcodeToString[lastRcode])
+	return nil, 0, &DNSRcodeError{Domain: norm, Rcode: lastRcode}
 }

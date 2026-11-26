@@ -132,6 +132,15 @@ func (d *Resolver) MatchSubdomains() bool {
 	return true
 }
 
+// HasDomain reports whether any local record (or wildcard) exists for name.
+func (d *Resolver) HasDomain(name string) bool {
+	fqdn := strings.ToLower(strings.TrimSpace(name))
+	if fqdn == "" || fqdn == "." {
+		return false
+	}
+	return d.hasRecordsForDomain(domain.Domain(dns.Fqdn(fqdn)), dns.TypeA)
+}
+
 // String returns a string representation of the local resolver
 func (d *Resolver) String() string {
 	return fmt.Sprintf("LocalResolver [%d records]", len(d.records))

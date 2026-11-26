@@ -128,3 +128,18 @@ func (m *MockServer) ManagedDomains() []string {
 func (m *MockServer) ResolveManagedDomain(context.Context, string, uint16) (*dns.Msg, error) {
 	return nil, fmt.Errorf("method ResolveManagedDomain is not implemented")
 }
+
+// HasDefaultUpstream mock implementation of HasDefaultUpstream from Server interface
+func (m *MockServer) HasDefaultUpstream() bool {
+	return false
+}
+
+// ResolveDefaultDomain mock implementation of ResolveDefaultDomain from Server interface
+func (m *MockServer) ResolveDefaultDomain(context.Context, string, uint16) (*dns.Msg, error) {
+	return nil, fmt.Errorf("method ResolveDefaultDomain is not implemented")
+}
+
+// HasLocalRecord mock implementation of HasLocalRecord from Server interface
+func (m *MockServer) HasLocalRecord(string) bool {
+	return false
+}
