@@ -46,15 +46,17 @@ type PeerConnStatus = peer.ConnStatus
 
 // Client manages a netbird embedded client instance.
 type Client struct {
-	deviceName string
-	config     *profilemanager.Config
-	mu         sync.Mutex
-	starting   bool
-	cancel     context.CancelFunc
-	setupKey   string
-	jwtToken   string
-	connect    *internal.ConnectClient
-	recorder   *peer.Status
+	deviceName     string
+	config         *profilemanager.Config
+	mu             sync.Mutex
+	exitNodeMu     sync.Mutex
+	starting       bool
+	cancel         context.CancelFunc
+	setupKey       string
+	jwtToken       string
+	connect        *internal.ConnectClient
+	recorder       *peer.Status
+	enableExitNode bool
 	// inMemoryState is set when no StatePath was given in netstack mode,
 	// where the client changes nothing on the host that needs restoring.
 	inMemoryState bool
@@ -87,6 +89,9 @@ type Options struct {
 	StatePath string
 	// DisableClientRoutes disables the client routes
 	DisableClientRoutes bool
+	// EnableExitNode enables routing internet traffic through an available NetBird exit node (0.0.0.0/0 or ::/0).
+	// When false, exit-node default routes remain deselected.
+	EnableExitNode bool
 	// DisableIPv6 disables IPv6 overlay addressing
 	DisableIPv6 bool
 	// BlockInbound blocks all inbound connections from peers
@@ -264,11 +269,12 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		deviceName: opts.DeviceName,
-		setupKey:   opts.SetupKey,
-		jwtToken:   opts.JWTToken,
-		config:     config,
-		recorder:   peer.NewRecorder(config.ManagementURL.String()),
+		deviceName:     opts.DeviceName,
+		setupKey:       opts.SetupKey,
+		jwtToken:       opts.JWTToken,
+		config:         config,
+		recorder:       peer.NewRecorder(config.ManagementURL.String()),
+		enableExitNode: opts.EnableExitNode,
 		// Without a path the default would be the installed agent's state
 		// file, which this client must neither read nor overwrite.
 		inMemoryState: opts.StatePath == "" && !opts.NoUserspace,
@@ -357,6 +363,8 @@ func (c *Client) Start(startCtx context.Context) error {
 	c.cancel = cancel
 	started = true
 	c.mu.Unlock()
+
+	c.reconcileExitNodeSelection()
 
 	return nil
 }

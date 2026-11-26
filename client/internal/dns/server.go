@@ -83,6 +83,9 @@ type Server interface {
 	SetRouteSources(selected, active func() route.HAMap)
 	SetFirewall(Firewall)
 	SetPeerActivator(local.PeerActivator)
+	MatchManagedDomain(domain string) bool
+	ManagedDomains() []string
+	ResolveManagedDomain(ctx context.Context, domain string, qtype uint16) (*dns.Msg, error)
 }
 
 type nsGroupsByDomain struct {
@@ -1436,6 +1439,36 @@ func (s *DefaultServer) PopulateManagementDomain(mgmtURL *url.URL) error {
 		return s.mgmtCacheResolver.PopulateFromConfig(s.ctx, mgmtURL)
 	}
 	return nil
+}
+
+// MatchManagedDomain reports whether domain matches a NetBird-managed DNS
+// handler (dynamic domain route, local peer/zone record, or domain-scoped NS group).
+func (s *DefaultServer) MatchManagedDomain(d string) bool {
+	if s.handlerChain == nil {
+		return false
+	}
+	return s.handlerChain.MatchDomainInRange(d, PriorityUpstream, PriorityDNSRoute)
+}
+
+// ManagedDomains returns the deduplicated, sorted non-root domain patterns
+// registered in the NetBird-managed priority range.
+func (s *DefaultServer) ManagedDomains() []string {
+	if s.handlerChain == nil {
+		return nil
+	}
+	return s.handlerChain.PatternsInRange(PriorityUpstream, PriorityDNSRoute)
+}
+
+// ResolveManagedDomain resolves a DNS question directly through the NetBird-managed
+// handler chain without falling through to host/fallback resolvers.
+func (s *DefaultServer) ResolveManagedDomain(ctx context.Context, d string, qtype uint16) (*dns.Msg, error) {
+	if s.handlerChain == nil {
+		return nil, errors.New("dns handler chain not initialized")
+	}
+	req := new(dns.Msg)
+	req.SetQuestion(dns.Fqdn(d), qtype)
+	req.RecursionDesired = true
+	return s.handlerChain.ResolveInternalRange(ctx, req, PriorityUpstream, PriorityDNSRoute)
 }
 
 // localPeerConnectivity adapts *peer.Status to local.PeerConnectivity so

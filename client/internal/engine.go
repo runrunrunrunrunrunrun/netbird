@@ -2318,6 +2318,34 @@ func (e *Engine) GetRouteManager() routemanager.Manager {
 	return e.routeManager
 }
 
+// GetDNSServer returns the engine's DNS server.
+func (e *Engine) GetDNSServer() dns.Server {
+	e.syncMsgMux.Lock()
+	defer e.syncMsgMux.Unlock()
+	return e.dnsServer
+}
+
+// GetOverlayPrefixes returns the valid IPv4 and IPv6 overlay prefixes assigned
+// to the local WireGuard interface.
+func (e *Engine) GetOverlayPrefixes() []netip.Prefix {
+	e.syncMsgMux.Lock()
+	intf := e.wgInterface
+	e.syncMsgMux.Unlock()
+	if intf == nil {
+		return nil
+	}
+
+	addr := intf.Address()
+	var prefixes []netip.Prefix
+	if addr.Network.IsValid() {
+		prefixes = append(prefixes, addr.Network)
+	}
+	if addr.IPv6Net.IsValid() {
+		prefixes = append(prefixes, addr.IPv6Net)
+	}
+	return prefixes
+}
+
 // GetFirewallManager returns the firewall manager.
 func (e *Engine) GetFirewallManager() firewallManager.Manager {
 	return e.firewall

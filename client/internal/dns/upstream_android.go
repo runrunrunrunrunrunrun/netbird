@@ -9,6 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/netbirdio/netbird/client/iface/wgbackend"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/shared/management/domain"
@@ -16,6 +17,8 @@ import (
 
 type upstreamResolver struct {
 	*upstreamResolverBase
+	wgIface        WGIface
+	nsNet          *wgbackend.NetstackNet
 	hostsDNSHolder *hostsDNSHolder
 }
 
@@ -24,14 +27,20 @@ type upstreamResolver struct {
 // first time, and we need to wait for a while to start to use again the proper DNS resolver.
 func newUpstreamResolver(
 	ctx context.Context,
-	_ WGIface,
+	wgIface WGIface,
 	statusRecorder *peer.Status,
 	hostsDNSHolder *hostsDNSHolder,
 	d domain.Domain,
 ) (*upstreamResolver, error) {
 	upstreamResolverBase := newUpstreamResolverBase(ctx, statusRecorder, d)
+	var nsNet *wgbackend.NetstackNet
+	if wgIface != nil {
+		nsNet = wgIface.GetNet()
+	}
 	c := &upstreamResolver{
 		upstreamResolverBase: upstreamResolverBase,
+		wgIface:              wgIface,
+		nsNet:                nsNet,
 		hostsDNSHolder:       hostsDNSHolder,
 	}
 	upstreamResolverBase.upstreamClient = c
@@ -41,6 +50,14 @@ func newUpstreamResolver(
 // exchange in case of Android if the upstream is a local resolver then we do not need to mark the socket as protected.
 // In other case the DNS resolvation goes through the VPN, so we need to force to use the
 func (u *upstreamResolver) exchange(ctx context.Context, upstream string, r *dns.Msg) (rm *dns.Msg, t time.Duration, err error) {
+	if u.nsNet != nil {
+		if u.isTunnelRoutedUpstream(upstream, u.wgIface) {
+			start := time.Now()
+			reply, err := ExchangeWithNetstack(ctx, u.nsNet, r, upstream)
+			return reply, time.Since(start), err
+		}
+		return u.exchangeWithoutVPN(ctx, upstream, r)
+	}
 	if u.isLocalResolver(upstream) {
 		return u.exchangeWithoutVPN(ctx, upstream, r)
 	} else {

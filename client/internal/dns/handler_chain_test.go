@@ -1267,3 +1267,42 @@ func TestHandlerChain_HasRootHandlerAtOrBelow(t *testing.T) {
 	chain.RemoveHandler(".", nbdns.PriorityFallback)
 	assert.False(t, chain.HasRootHandlerAtOrBelow(nbdns.PriorityUpstream))
 }
+
+type subdomainAnsweringHandler struct {
+	*answeringHandler
+}
+
+func (s *subdomainAnsweringHandler) MatchSubdomains() bool { return true }
+
+func TestHandlerChain_ManagedRangeHelpers(t *testing.T) {
+	chain := nbdns.NewHandlerChain()
+
+	localH := &subdomainAnsweringHandler{&answeringHandler{name: "local", ip: "100.64.0.2"}}
+	fallbackH := &answeringHandler{name: "fallback", ip: "1.1.1.1"}
+	mgmtCacheH := &answeringHandler{name: "mgmt", ip: "9.9.9.9"}
+
+	chain.AddHandler(".", fallbackH, nbdns.PriorityFallback)
+	chain.AddHandler("mgmt.example.com.", mgmtCacheH, nbdns.PriorityMgmtCache)
+	chain.AddHandler("netbird.selfhosted.", localH, nbdns.PriorityLocal)
+	chain.AddHandler("*.corp.internal.", &answeringHandler{name: "upstream", ip: "10.10.0.53"}, nbdns.PriorityUpstream)
+
+	assert.True(t, chain.MatchDomainInRange("peer1.netbird.selfhosted", nbdns.PriorityUpstream, nbdns.PriorityDNSRoute))
+	assert.True(t, chain.MatchDomainInRange("APP.CORP.INTERNAL.", nbdns.PriorityUpstream, nbdns.PriorityDNSRoute))
+	assert.False(t, chain.MatchDomainInRange("mgmt.example.com", nbdns.PriorityUpstream, nbdns.PriorityDNSRoute))
+	assert.False(t, chain.MatchDomainInRange("google.com", nbdns.PriorityUpstream, nbdns.PriorityDNSRoute))
+
+	patterns := chain.PatternsInRange(nbdns.PriorityUpstream, nbdns.PriorityDNSRoute)
+	assert.Equal(t, []string{"*.corp.internal", "netbird.selfhosted"}, patterns)
+
+	// In-range resolution must succeed for local NetBird domain.
+	q := new(dns.Msg).SetQuestion("peer1.netbird.selfhosted.", dns.TypeA)
+	resp, err := chain.ResolveInternalRange(context.Background(), q, nbdns.PriorityUpstream, nbdns.PriorityDNSRoute)
+	require.NoError(t, err)
+	require.Len(t, resp.Answer, 1)
+	assert.Equal(t, "100.64.0.2", resp.Answer[0].(*dns.A).A.String())
+
+	// Unknown public domain must NOT fall through to PriorityFallback "." handler.
+	pubQ := new(dns.Msg).SetQuestion("google.com.", dns.TypeA)
+	_, err = chain.ResolveInternalRange(context.Background(), pubQ, nbdns.PriorityUpstream, nbdns.PriorityDNSRoute)
+	assert.Error(t, err)
+}

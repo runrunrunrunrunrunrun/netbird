@@ -4,20 +4,24 @@ package dns
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
 
 	"github.com/netbirdio/netbird/client/iface/wgbackend"
 	"github.com/netbirdio/netbird/client/internal/peer"
+	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/shared/management/domain"
 )
 
 type upstreamResolver struct {
 	*upstreamResolverBase
-	nsNet *wgbackend.NetstackNet
+	wgIface WGIface
+	nsNet   *wgbackend.NetstackNet
 }
 
 func newUpstreamResolver(
@@ -28,23 +32,44 @@ func newUpstreamResolver(
 	d domain.Domain,
 ) (*upstreamResolver, error) {
 	upstreamResolverBase := newUpstreamResolverBase(ctx, statusRecorder, d)
+	var nsNet *wgbackend.NetstackNet
+	if wgIface != nil {
+		nsNet = wgIface.GetNet()
+	}
 	nonIOS := &upstreamResolver{
 		upstreamResolverBase: upstreamResolverBase,
-		nsNet:                wgIface.GetNet(),
+		wgIface:              wgIface,
+		nsNet:                nsNet,
 	}
 	upstreamResolverBase.upstreamClient = nonIOS
 	return nonIOS, nil
 }
 
 func (u *upstreamResolver) exchange(ctx context.Context, upstream string, r *dns.Msg) (rm *dns.Msg, t time.Duration, err error) {
-	// TODO: Check if upstream DNS server is routed through a peer before using netstack.
-	// Similar to iOS logic, we should determine if the DNS server is reachable directly
-	// or needs to go through the tunnel, and only use netstack when necessary.
-	// For now, only use netstack on JS platform where direct access is not possible.
-	if u.nsNet != nil && runtime.GOOS == "js" {
-		start := time.Now()
-		reply, err := ExchangeWithNetstack(ctx, u.nsNet, r, upstream)
-		return reply, time.Since(start), err
+	if u.nsNet != nil {
+		if runtime.GOOS == "js" || u.isTunnelRoutedUpstream(upstream, u.wgIface) {
+			start := time.Now()
+			reply, err := ExchangeWithNetstack(ctx, u.nsNet, r, upstream)
+			return reply, time.Since(start), err
+		}
+
+		// Public upstreams in netstack mode must bind via NetBird's external socket
+		// control so they bypass an outer TUN (e.g. Xray tunIn) and do not loop.
+		timeout := UpstreamTimeout
+		if deadline, ok := ctx.Deadline(); ok {
+			timeout = time.Until(deadline)
+		}
+		nbDialer := nbnet.NewDialer()
+		client := &dns.Client{
+			Timeout: timeout,
+			Dialer: &net.Dialer{
+				Timeout: timeout,
+				Control: func(network, address string, c syscall.RawConn) error {
+					return nbDialer.Control(network, address, c)
+				},
+			},
+		}
+		return ExchangeWithFallback(ctx, client, r, upstream)
 	}
 
 	client := &dns.Client{

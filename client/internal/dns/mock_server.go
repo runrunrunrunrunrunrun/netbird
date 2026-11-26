@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -111,4 +112,19 @@ func (m *MockServer) EndBatch() {
 // CancelBatch mock implementation of CancelBatch from Server interface
 func (m *MockServer) CancelBatch() {
 	// Mock implementation - no-op
+}
+
+// MatchManagedDomain mock implementation of MatchManagedDomain from Server interface
+func (m *MockServer) MatchManagedDomain(string) bool {
+	return false
+}
+
+// ManagedDomains mock implementation of ManagedDomains from Server interface
+func (m *MockServer) ManagedDomains() []string {
+	return nil
+}
+
+// ResolveManagedDomain mock implementation of ResolveManagedDomain from Server interface
+func (m *MockServer) ResolveManagedDomain(context.Context, string, uint16) (*dns.Msg, error) {
+	return nil, fmt.Errorf("method ResolveManagedDomain is not implemented")
 }

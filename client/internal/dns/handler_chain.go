@@ -195,12 +195,60 @@ func (c *HandlerChain) logHandlers() {
 }
 
 func (c *HandlerChain) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	c.dispatch(w, r, math.MaxInt)
+	c.dispatchRange(w, r, math.MinInt, math.MaxInt)
 }
 
-// dispatch routes a DNS request through the chain, skipping handlers with
-// priority > maxPriority. Shared by ServeDNS and ResolveInternal.
-func (c *HandlerChain) dispatch(w dns.ResponseWriter, r *dns.Msg, maxPriority int) {
+// MatchDomainInRange reports whether any non-root handler in [minPriority, maxPriority]
+// matches domain.
+func (c *HandlerChain) MatchDomainInRange(domain string, minPriority, maxPriority int) bool {
+	qname := strings.ToLower(dns.Fqdn(domain))
+	if qname == "" || qname == "." {
+		return false
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for _, entry := range c.handlers {
+		if entry.Pattern == "." || entry.Priority < minPriority || entry.Priority > maxPriority {
+			continue
+		}
+		if c.isHandlerMatch(qname, entry) {
+			return true
+		}
+	}
+	return false
+}
+
+// PatternsInRange returns sorted, deduplicated non-root patterns registered in
+// [minPriority, maxPriority].
+func (c *HandlerChain) PatternsInRange(minPriority, maxPriority int) []string {
+	c.mu.RLock()
+	seen := make(map[string]struct{}, len(c.handlers))
+	patterns := make([]string, 0, len(c.handlers))
+	for _, entry := range c.handlers {
+		if entry.Pattern == "." || entry.Priority < minPriority || entry.Priority > maxPriority {
+			continue
+		}
+		trimmed := strings.TrimSuffix(entry.OrigPattern, ".")
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		patterns = append(patterns, trimmed)
+	}
+	c.mu.RUnlock()
+
+	slices.Sort(patterns)
+	return patterns
+}
+
+// dispatchRange routes a DNS request through the chain, skipping handlers
+// outside [minPriority, maxPriority] (and root "." handlers when minPriority > PriorityDefault).
+func (c *HandlerChain) dispatchRange(w dns.ResponseWriter, r *dns.Msg, minPriority, maxPriority int) {
 	if len(r.Question) == 0 {
 		return
 	}
@@ -225,7 +273,10 @@ func (c *HandlerChain) dispatch(w dns.ResponseWriter, r *dns.Msg, maxPriority in
 
 	// Try handlers in priority order
 	for _, entry := range handlers {
-		if entry.Priority > maxPriority {
+		if entry.Priority > maxPriority || entry.Priority < minPriority {
+			continue
+		}
+		if minPriority > PriorityDefault && entry.Pattern == "." {
 			continue
 		}
 		if !c.isHandlerMatch(qname, entry) {
@@ -291,6 +342,12 @@ func (c *HandlerChain) logResponse(logger *log.Entry, cw *ResponseWriterChain, q
 // cancellation; on ctx.Done the dispatch goroutine is left to drain on its own
 // (bounded by the invoked handler's internal timeout).
 func (c *HandlerChain) ResolveInternal(ctx context.Context, r *dns.Msg, maxPriority int) (*dns.Msg, error) {
+	return c.ResolveInternalRange(ctx, r, math.MinInt, maxPriority)
+}
+
+// ResolveInternalRange runs an in-process DNS query against handlers in
+// [minPriority, maxPriority].
+func (c *HandlerChain) ResolveInternalRange(ctx context.Context, r *dns.Msg, minPriority, maxPriority int) (*dns.Msg, error) {
 	if len(r.Question) == 0 {
 		return nil, fmt.Errorf("empty question")
 	}
@@ -298,7 +355,7 @@ func (c *HandlerChain) ResolveInternal(ctx context.Context, r *dns.Msg, maxPrior
 	base := &internalResponseWriter{}
 	done := make(chan struct{})
 	go func() {
-		c.dispatch(base, r, maxPriority)
+		c.dispatchRange(base, r, minPriority, maxPriority)
 		close(done)
 	}()
 
@@ -314,8 +371,8 @@ func (c *HandlerChain) ResolveInternal(ctx context.Context, r *dns.Msg, maxPrior
 	}
 
 	if base.response == nil || base.response.Rcode == dns.RcodeRefused {
-		return nil, fmt.Errorf("no handler resolved %s at priority ≤ %d",
-			strings.ToLower(r.Question[0].Name), maxPriority)
+		return nil, fmt.Errorf("no handler resolved %s in priority [%d, %d]",
+			strings.ToLower(r.Question[0].Name), minPriority, maxPriority)
 	}
 	return base.response, nil
 }

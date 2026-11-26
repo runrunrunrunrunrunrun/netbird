@@ -1251,6 +1251,58 @@ func (d *Status) GetResolvedDomainsStates() map[domain.Domain]ResolvedDomainInfo
 	return maps.Clone(d.resolvedDomainsStates)
 }
 
+// GetResolvedDomainPrefixes returns the deduplicated set of currently resolved
+// IP prefixes for dynamic domain routes.
+func (d *Status) GetResolvedDomainPrefixes() []netip.Prefix {
+	d.mux.RLock()
+	defer d.mux.RUnlock()
+
+	if len(d.resolvedDomainsStates) == 0 {
+		return nil
+	}
+	seen := make(map[netip.Prefix]struct{})
+	var prefixes []netip.Prefix
+	for _, info := range d.resolvedDomainsStates {
+		for _, prefix := range info.Prefixes {
+			if !prefix.IsValid() {
+				continue
+			}
+			if _, ok := seen[prefix]; ok {
+				continue
+			}
+			seen[prefix] = struct{}{}
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	return prefixes
+}
+
+// GetPeerFQDNs returns the deduplicated FQDNs of the local peer and known peers
+// without triggering health probes.
+func (d *Status) GetPeerFQDNs() []string {
+	d.mux.RLock()
+	defer d.mux.RUnlock()
+
+	seen := make(map[string]struct{}, 1+len(d.peers))
+	var fqdns []string
+	add := func(fqdn string) {
+		if fqdn == "" {
+			return
+		}
+		if _, ok := seen[fqdn]; ok {
+			return
+		}
+		seen[fqdn] = struct{}{}
+		fqdns = append(fqdns, fqdn)
+	}
+	add(d.localPeer.FQDN)
+	for _, state := range d.peers {
+		add(state.FQDN)
+	}
+	slices.Sort(fqdns)
+	return fqdns
+}
+
 // GetPeerStates returns a snapshot of all known peer states, including offline peers.
 func (d *Status) GetPeerStates() []State {
 	d.mux.RLock()

@@ -886,3 +886,45 @@ func haMapContains(hm route.HAMap, ip netip.Addr) (matched, haveDynamic bool) {
 	}
 	return false, haveDynamic
 }
+
+// isTunnelRoutedUpstream reports whether upstream points to an address within
+// the WireGuard overlay or a non-default selected client route. Default routes
+// (Bits() == 0, exit nodes) are intentionally excluded so public upstream DNS
+// servers continue to bypass Xray/TUN via physical NIC binding.
+func (u *upstreamResolverBase) isTunnelRoutedUpstream(upstream string, wgIface WGIface) bool {
+	var addr netip.Addr
+	if addrPort, err := netip.ParseAddrPort(upstream); err == nil {
+		addr = addrPort.Addr().Unmap()
+	} else if host, _, err := net.SplitHostPort(upstream); err == nil {
+		parsed, parseErr := netip.ParseAddr(host)
+		if parseErr != nil {
+			return false
+		}
+		addr = parsed.Unmap()
+	} else {
+		return false
+	}
+
+	if wgIface != nil {
+		wgAddr := wgIface.Address()
+		if (wgAddr.Network.IsValid() && wgAddr.Network.Contains(addr)) ||
+			(wgAddr.IPv6Net.IsValid() && wgAddr.IPv6Net.Contains(addr)) {
+			return true
+		}
+	}
+
+	if u.selectedRoutes == nil {
+		return false
+	}
+	for _, routes := range u.selectedRoutes() {
+		for _, r := range routes {
+			if r.IsDynamic() {
+				continue
+			}
+			if r.Network.IsValid() && r.Network.Bits() > 0 && r.Network.Contains(addr) {
+				return true
+			}
+		}
+	}
+	return false
+}
