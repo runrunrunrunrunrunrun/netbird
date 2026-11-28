@@ -1,11 +1,11 @@
 package system
 
 import (
-	"bytes"
 	"context"
-	"os/exec"
+	"os"
 	"runtime"
 	"strings"
+	"syscall"
 
 	log "github.com/sirupsen/logrus"
 
@@ -17,85 +17,38 @@ func UpdateStaticInfoAsync() {
 	// do nothing
 }
 
-// GetInfo retrieves and parses the system information
+// GetInfo retrieves and parses the system information without spawning subprocesses,
+// avoiding Android 10/11 seccomp SIGSYS in os/exec pidfd checks and SELinux denials.
 func GetInfo(ctx context.Context) *Info {
-	kernel := "android"
-	osInfo := uname()
-	if len(osInfo) == 2 {
-		kernel = osInfo[1]
-	}
-
-	var kernelVersion string
-	if len(osInfo) > 2 {
-		kernelVersion = osInfo[2]
-	}
+	kernel, kernelVersion := unameInfo()
+	props := readBuildProps()
 
 	addrs, err := networkAddresses()
 	if err != nil {
 		log.Warnf("discover network addresses: %s", err)
 	}
 
-	gio := &Info{
+	return &Info{
 		GoOS:               runtime.GOOS,
 		Kernel:             kernel,
 		Platform:           "unknown",
 		OS:                 "Android",
-		OSVersion:          osVersion(),
+		OSVersion:          props["ro.build.version.release"],
 		Hostname:           extractDeviceName(ctx, "android"),
 		CPUs:               runtime.NumCPU(),
 		NetbirdVersion:     version.NetbirdVersion(),
 		UIVersion:          extractUIVersion(ctx),
 		KernelVersion:      kernelVersion,
 		NetworkAddresses:   addrs,
-		SystemSerialNumber: serial(),
-		SystemProductName:  productModel(),
-		SystemManufacturer: productManufacturer(),
+		SystemSerialNumber: "",
+		SystemProductName:  props["ro.product.model"],
+		SystemManufacturer: props["ro.product.manufacturer"],
 	}
-
-	return gio
 }
 
 // checkFileAndProcess checks if the file path exists and if a process is running at that path.
 func checkFileAndProcess(_ context.Context, _ []string) ([]File, error) {
 	return []File{}, nil
-}
-
-func serial() string {
-	// try to fetch serial ID using different properties
-	properties := []string{"ril.serialnumber", "ro.serialno", "ro.boot.serialno", "sys.serialnumber"}
-	var value string
-
-	for _, property := range properties {
-		value = getprop(property)
-		if len(value) > 0 {
-			return value
-		}
-	}
-
-	// unable to get serial ID, fallback to ANDROID_ID
-	return androidId()
-}
-
-func androidId() string {
-	// this is a uniq id defined on first initialization, id will be a new one if user wipes his device
-	return run("/system/bin/settings", "get", "secure", "android_id")
-}
-
-func productModel() string {
-	return getprop("ro.product.model")
-}
-
-func productManufacturer() string {
-	return getprop("ro.product.manufacturer")
-}
-
-func uname() []string {
-	res := run("/system/bin/uname", "-a")
-	return strings.Split(res, " ")
-}
-
-func osVersion() string {
-	return getprop("ro.build.version.release")
 }
 
 func extractUIVersion(ctx context.Context) string {
@@ -106,21 +59,51 @@ func extractUIVersion(ctx context.Context) string {
 	return v
 }
 
-func getprop(arg ...string) string {
-	return run("/system/bin/getprop", arg...)
+func unameInfo() (string, string) {
+	var uts syscall.Utsname
+	if err := syscall.Uname(&uts); err != nil {
+		return "android", ""
+	}
+	sysname := utsCharsToString(uts.Sysname)
+	if sysname == "" {
+		sysname = "android"
+	}
+	release := utsCharsToString(uts.Release)
+	return sysname, release
 }
 
-func run(name string, arg ...string) string {
-	cmd := exec.Command(name, arg...)
-	cmd.Stdin = strings.NewReader("some")
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		log.Errorf("getInfo: %s", err)
+func utsCharsToString[T ~int8 | ~uint8](arr [65]T) string {
+	buf := make([]byte, 0, len(arr))
+	for _, c := range arr {
+		if c == 0 {
+			break
+		}
+		buf = append(buf, byte(c))
 	}
+	return strings.TrimSpace(string(buf))
+}
 
-	return strings.TrimSpace(out.String())
+func readBuildProps() map[string]string {
+	props := make(map[string]string)
+	for _, path := range []string{"/system/build.prop", "/vendor/build.prop"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			k = strings.TrimSpace(k)
+			if _, exists := props[k]; !exists {
+				props[k] = strings.TrimSpace(v)
+			}
+		}
+	}
+	return props
 }
